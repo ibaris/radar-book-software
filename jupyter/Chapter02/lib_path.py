@@ -4,4 +4,5 @@ import os
 module_path = os.path.abspath(os.path.join(os.pardir, os.pardir))
 if module_path not in sys.path:
     sys.path.append(module_path)
+    print(f"Using module {module_path}.")
     
