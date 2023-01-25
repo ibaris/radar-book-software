@@ -7,6 +7,7 @@ HEADER
 *For COPYING and LICENSE details, please refer to the LICENSE file*
 
 """
+from typing import Literal, Union
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.constants import c as SPEED_OF_LIGHT
@@ -19,30 +20,38 @@ import warnings
 from scipy.special import binom
 from scipy.signal.windows import chebwin, hann, hamming, blackmanharris, kaiser
 
-%matplotlib qt
+# %matplotlib qt
+
+WINDOW_TYPE = Literal["Uniform", "Binomial", "Tschebyscheff",
+                      "Kaiser", "Blackman-Harris", "Hanning", "Hamming"]
 
 
 # ----------------------------------------------------------------------------------------------
 # Utility
 # ----------------------------------------------------------------------------------------------
-def array_factor(number_of_elements, scan_angle, element_spacing, frequency, theta, window_type, side_lobe_level):
-    """
-    Calculate the array factor for a linear binomial excited array.
-    :param window_type: The string name of the window.
-    :param side_lobe_level: The sidelobe level for Tschebyscheff window (dB).
-    :param number_of_elements: The number of elements in the array.
-    :param scan_angle: The angle to which the main beam is scanned (rad).
-    :param element_spacing: The distance between elements.
-    :param frequency: The operating frequency (Hz).
-    :param theta: The angle at which to evaluate the array factor (rad).
-    :return: The array factor as a function of angle.
-    """
-    # Calculate the wavenumber
-    k = 2.0 * PI * frequency / SPEED_OF_LIGHT
+def antenna_pattern_coefficients(number_of_elements: int,
+                                 window_type: WINDOW_TYPE = "Uniform",
+                                 side_lobe_level: float = 0) -> np.ndarray:
+    """Compute the coefficients for the antenna pattern.
 
-    # Calculate the phase
-    psi = k * element_spacing * (np.cos(theta) - np.cos(scan_angle))
+    Parameters
+    ----------
+    number_of_elements : int
+        The number of elements in the array.
+    window_type : WINDOW_TYPE, optional
+        The string name of the window., by default "Uniform"
+    side_lobe_level : float, optional
+        The sidelobe level for Tschebyscheff window in [dB], by default 0
 
+    Returns
+    -------
+    np.ndarray
+
+    Raises
+    ------
+    AssertionError
+        The window type is not supported. 
+    """
     # Calculate the coefficients
     if window_type == 'Uniform':
         coefficients = np.ones(number_of_elements)
@@ -60,11 +69,51 @@ def array_factor(number_of_elements, scan_angle, element_spacing, frequency, the
     elif window_type == 'Hamming':
         coefficients = hamming(number_of_elements, True)
 
-    # Calculate the offset for even/odd
-    offset = int(np.floor(number_of_elements / 2))
+    else:
+        raise AssertionError(
+            f"Window type {window_type} not understood. Available window types are {WINDOW_TYPE}.")
+
+    return coefficients
+
+
+def antenna_factor(coefficients: np.ndarray,
+                   scan_angle: float,
+                   element_spacing: float,
+                   frequency: float,
+                   theta: float,
+                   offset: int,
+                   odd_case: bool) -> float:
+    """Calculate the array factor for a linear binomial excited array.
+
+    Parameters
+    ----------
+    coefficients : np.ndarray
+        The antenna pattern coefficients. See `antenna_pattern_coefficients`.
+    scan_angle : float
+        The angle to which the main beam is scanned in [rad].
+    element_spacing : float
+        The distance between elements.
+    frequency : float
+        he operating frequency in [Hz].
+    theta : float
+        The angle at which to evaluate the array factor [rad].
+    offset : int
+        Offset for even/odd case. This is the number of elements divided by 2. 
+    odd_case : bool
+        Determine if the number of elements is odd or even.
+
+    Returns
+    -------
+    float
+    """
+    # Calculate the wavenumber
+    k = 2.0 * PI * frequency / SPEED_OF_LIGHT
+
+    # Calculate the phase
+    psi = k * element_spacing * (np.cos(theta) - np.cos(scan_angle))
 
     # Odd case
-    if number_of_elements & 1:
+    if odd_case:
         coefficients = np.roll(coefficients, offset + 1)
         coefficients[0] *= 0.5
         return sum(coefficients[i] * np.cos(i * psi) for i in range(offset + 1))
@@ -74,24 +123,37 @@ def array_factor(number_of_elements, scan_angle, element_spacing, frequency, the
         return sum(coefficients[i] * np.cos((i + 0.5) * psi) for i in range(offset))
 
 
-def reconstruct(signal, sensor_x, sensor_y, sensor_z, range_center, x_image, y_image, z_image, frequency, fft_length):
+def back_projection(signal: np.ndarray,
+                    sensor_position: np.ndarray,
+                    range_center: Union[float, int, list, np.ndarray],
+                    image: np.ndarray,
+                    frequency_step: float,
+                    frequency_start: float,
+                    fft_length: int) -> np.ndarray:
     """
     Reconstruct the two-dimensional image using the filtered backprojection method.
-    :param signal: The signal in K-space.
-    :param sensor_x: The sensor x-coordinate (m).
-    :param sensor_y: The sensor y-coordinate (m).
-    :param sensor_z: The sensor z-coordinate (m).
-    :param range_center: The range to the center of the image (m).
-    :param x_image: The x-coordinates of the image (m).
-    :param y_image: The y-coordinates of the image (m).
-    :param z_image: The z-coordinates of the image (m).
-    :param frequency: The frequency array (Hz).
-    :param fft_length: The number of points in the FFT.
-    :return: The reconstructed image.
-    """
-    # Get the frequency step size
-    frequency_step = frequency[1] - frequency[0]
 
+    Parameters
+    ----------
+    signal : np.ndarray
+        The signal in K-space.
+    sensor_position : np.ndarray
+        An array with the sensor [x, y, z] coordinates in [m].
+    range_center : Union[float, int, list, np.ndarray]
+        The range to the center of the image in [m].
+    image : np.ndarray
+        The [x, y, z] coordinates of the image in [m].
+    frequency_step : float
+        This ist the first frequency minus the last frequency of the frequency array.
+    frequency_start : float
+        The first frequency in the frequency array.
+    fft_length : int
+        The number of points in the FFT.
+
+    Returns
+    -------
+    np.ndarray
+    """
     # Calculate the maximum scene size and resolution
     range_extent = SPEED_OF_LIGHT / (2.0 * frequency_step)
 
@@ -99,17 +161,18 @@ def reconstruct(signal, sensor_x, sensor_y, sensor_z, range_center, x_image, y_i
     range_window = np.linspace(-0.5 * range_extent, 0.5 * range_extent, fft_length)
 
     # Initialize the image
-    bp_image = np.zeros_like(x_image, dtype=complex)
+    bp_image = np.zeros_like(image[0], dtype=complex)
 
     # Loop over all pulses in the data
-    term = 1j * 4.0 * PI * frequency[0] / SPEED_OF_LIGHT
+    # term = 1j * 4.0 * PI * frequency[0] / SPEED_OF_LIGHT
+    term = 1j * 4.0 * PI * frequency_start / SPEED_OF_LIGHT
 
     # To work with stripmap
     if not isinstance(range_center, list):
-        range_center *= np.ones(len(sensor_x))
+        range_center *= np.ones(len(sensor_position[0]))
 
     index = 0
-    for xs, ys, zs in zip(sensor_x, sensor_y, sensor_z):
+    for xs, ys, zs in zip(sensor_position[0], sensor_position[1], sensor_position[2]):
 
         # Calculate the range profile
         range_profile = fftshift(ifft(signal[:, index], fft_length))
@@ -118,8 +181,8 @@ def reconstruct(signal, sensor_x, sensor_y, sensor_z, range_center, x_image, y_i
         f = interp1d(range_window, range_profile, kind='linear', bounds_error=False, fill_value=0.0)
 
         # Calculate the range to each pixel
-        range_image = np.sqrt((xs - x_image) ** 2 + (ys - y_image) ** 2 +
-                              (zs - z_image) ** 2) - range_center[index]
+        range_image = np.sqrt((xs - image[0]) ** 2 + (ys - image[1]) ** 2 +
+                              (zs - image[2]) ** 2) - range_center[index]
 
         # Interpolate the range profile onto the image grid and multiply by the range phase
         # For large scenes, should check the range window and index
@@ -140,18 +203,26 @@ x_center = 1000
 y_center = x_center * np.tan(squint_angle)
 
 # * Set the range to the center of the image (m), the **x** location of the target, they **y** location of the target, the target RCS (m^2)
+#! These are only point targets.
 range_center = 1e3
 xt = [-3.0, 8.0]
 yt = [10.0, -40.0]
 rt = [5.0, 10.0]
 
-# * Set image span in the **x** and **y** directions
+# * Set image span in the **x** and **y** directions (This is the size of the image measured from the center).
 x_span = 30.0
 y_span = 100.0
 
 # * Set the number of bins in the **x** and **y** directions
 nx = 400
 ny = 400
+
+# * Alternatively, define the resolution of the system and calculate the bins automatically.
+x_resolution = 0.25
+y_resolution = 0.5
+
+# nx = int(np.floor(x_span / x_resolution))
+# ny = int(np.floor(y_span / y_resolution))
 
 # Create Image Space ===============================================================
 # * Set up the image space (m)
@@ -160,6 +231,8 @@ yi = np.linspace(-0.5 * y_span + y_center, 0.5 * y_span + y_center, ny)
 
 x_image, y_image = np.meshgrid(xi, yi)
 z_image = np.zeros_like(x_image)
+
+image = np.array([x_image, y_image, z_image])
 
 # ----------------------------------------------------------------------------------------------
 # Sensor Parameter
@@ -182,6 +255,8 @@ number_of_frequencies = int(np.ceil(bandwidth / df))
 
 # * Set up the frequency space
 frequency = np.linspace(start_frequency, start_frequency + bandwidth, number_of_frequencies)
+frequency_step = frequency[1] - frequency[0]
+frequency_start = frequency[0]
 
 # * Set the length of the FFT
 fft_length = next_fast_len(4 * number_of_frequencies)
@@ -192,6 +267,8 @@ element_spacing = wavelength / 4.0
 
 # * Calculate the number of antenna elements
 number_of_elements = int(np.ceil(antenna_width / element_spacing + 1))
+odd_case = number_of_elements & 1
+offset = int(np.floor(number_of_elements / 2))
 
 # * Calculate the spacing on the synthetic aperture (m)
 aperture_spacing = np.tan(SPEED_OF_LIGHT / (2 * y_span * start_frequency)) * x_center  # Based on y_span
@@ -208,6 +285,8 @@ sensor_x = np.zeros_like(synthetic_aperture)
 sensor_y = synthetic_aperture
 sensor_z = np.zeros_like(synthetic_aperture)
 
+sensor_position = np.array([sensor_x, sensor_y, sensor_z])
+
 # ----------------------------------------------------------------------------------------------
 # Signal Calculation
 # ----------------------------------------------------------------------------------------------
@@ -219,6 +298,11 @@ range_center = np.zeros_like(synthetic_aperture)
 
 # * Phase term for the range phase (rad)
 phase_term = -1j * 4.0 * PI * frequency / SPEED_OF_LIGHT
+
+# * Initialize the antenna coefficients
+antenna_coef = antenna_pattern_coefficients(number_of_elements=number_of_elements,
+                                            window_type="Uniform",
+                                            side_lobe_level=0)
 
 # * Create the signal (k-space)
 for index, sa in enumerate(synthetic_aperture):
@@ -232,37 +316,21 @@ for index, sa in enumerate(synthetic_aperture):
 
         target_azimuth = np.arctan((y_center + y - sa) / (x_center + x))
 
-        antenna_pattern = array_factor(number_of_elements,
-                                       0.5 * np.pi - squint_angle,
-                                       element_spacing,
-                                       start_frequency,
-                                       0.5 * np.pi - target_azimuth,
-                                       'Uniform',
-                                       0) * np.cos(squint_angle)
+        antenna_pattern = antenna_factor(coefficients=antenna_coef,
+                                         scan_angle=0.5 * np.pi - squint_angle,
+                                         element_spacing=element_spacing,
+                                         frequency=start_frequency,
+                                         theta=0.5 * np.pi - target_azimuth,
+                                         offset=offset,
+                                         odd_case=odd_case) * np.cos(squint_angle)
 
         signal[:, index] += r * antenna_pattern ** 2 * np.exp(phase_term * target_range)
-
-# Plot Signal ======================================================================
-# signal_i = abs(signal) / np.amax(abs(signal))  # ! Normalize the Image.
-# signal_idb = 20.0 * np.log10(signal_i)
-
-# fig, axes1 = plt.subplots()
-
-# # create the color plot
-# im = axes1.imshow(signal_idb)
-# cbar = fig.colorbar(im, ax=axes1, orientation='horizontal')
-# cbar.set_label("Decibel", size=10)
-
-# # Set the plot title and labels
-# axes1.set_title('Unfiltered Signal', size=10)
-# axes1.set_ylabel('Frequency', size=10)
-# axes1.set_xlabel('Azimuth in [m]', size=10)
 
 # ----------------------------------------------------------------------------------------------
 # Filter Signal
 # ----------------------------------------------------------------------------------------------
 # * Set the window type (Rectangular, Hanning, or Hamming)
-window_type = 'Hamming'
+window_type = 'Hanning'
 
 # * Get the selected window
 if window_type == 'Hanning':
@@ -280,29 +348,17 @@ elif window_type == 'Rectangular':
 
 signal_filtered = signal * coefficients
 
-# Plot Signal ======================================================================
-# signal_filtered_i = abs(signal_filtered) / np.amax(abs(signal_filtered))  # ! Normalize the Image.
-# signal_filtered_idb = 20.0 * np.log10(signal_filtered_i)
-
-# fig, axes1 = plt.subplots()
-
-# # create the color plot
-# im = axes1.imshow(signal_filtered_idb)
-# cbar = fig.colorbar(im, ax=axes1, orientation='horizontal')
-# cbar.set_label("Decibel", size=10)
-
-# # Set the plot title and labels
-# axes1.set_title('Filtered Signal', size=10)
-# axes1.set_ylabel('Frequency', size=10)
-# axes1.set_xlabel('Azimuth in [m]', size=10)
-
 # ----------------------------------------------------------------------------------------------
 # Backprojection of Image
 # ----------------------------------------------------------------------------------------------
 # * Reconstruct the image using the `backprojection` routines
-bp_image = reconstruct(signal, sensor_x, sensor_y, sensor_z, range_center,
-                       x_image, y_image, z_image, frequency, fft_length)
-
+bp_image = back_projection(signal=signal,
+                           sensor_position=sensor_position,
+                           range_center=range_center,
+                           image=image,
+                           frequency_step=frequency_step,
+                           frequency_start=frequency_start,
+                           fft_length=fft_length)
 
 # Normalize the image
 bpi = np.abs(bp_image) / np.amax(abs(bp_image))
@@ -323,3 +379,35 @@ cbar.set_label("(dB)", size=10)
 axes1.set_title('Back Projected Signal', size=14)
 axes1.set_xlabel('Range [m]', size=12)
 axes1.set_ylabel('Azimuth [m]', size=12)
+
+# Plot Signal ======================================================================
+# signal_i = abs(signal) / np.amax(abs(signal))  # ! Normalize the Image.
+# signal_idb = 20.0 * np.log10(signal_i)
+
+# fig, axes1 = plt.subplots()
+
+# # create the color plot
+# im = axes1.imshow(signal_idb)
+# cbar = fig.colorbar(im, ax=axes1, orientation='horizontal')
+# cbar.set_label("Decibel", size=10)
+
+# # Set the plot title and labels
+# axes1.set_title('Unfiltered Signal', size=10)
+# axes1.set_ylabel('Frequency', size=10)
+# axes1.set_xlabel('Azimuth in [m]', size=10)
+
+# Plot Filtered Signal =============================================================
+# signal_filtered_i = abs(signal_filtered) / np.amax(abs(signal_filtered))  # ! Normalize the Image.
+# signal_filtered_idb = 20.0 * np.log10(signal_filtered_i)
+
+# fig, axes1 = plt.subplots()
+
+# # create the color plot
+# im = axes1.imshow(signal_filtered_idb)
+# cbar = fig.colorbar(im, ax=axes1, orientation='horizontal')
+# cbar.set_label("Decibel", size=10)
+
+# # Set the plot title and labels
+# axes1.set_title('Filtered Signal', size=10)
+# axes1.set_ylabel('Frequency', size=10)
+# axes1.set_xlabel('Azimuth in [m]', size=10)

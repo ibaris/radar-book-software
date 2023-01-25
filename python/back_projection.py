@@ -16,7 +16,6 @@ from scipy.fftpack import next_fast_len
 from scipy.signal.windows import hann, hamming
 from scipy.interpolate import interp1d
 from scipy.fftpack import ifft, fftshift
-%matplotlib qt
 
 
 # ----------------------------------------------------------------------------------------------
